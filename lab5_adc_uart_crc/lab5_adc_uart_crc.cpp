@@ -10,7 +10,7 @@
 
 #include "../hal/adc.hpp"
 #include "../hal/crc.hpp"
-#include "../hal/serial.hpp"
+#include "msp432_serial_driver.hpp"
 #include "../hal/timer.hpp"
 
 // GNU rdimon provides printf output in the CCS CIO Console. The debugger
@@ -48,13 +48,6 @@ constexpr device_role this_device = device_role::sensor;
 class msp432_adc_driver : public lab5::adc16_stream
 {
   // TODO: Implement the ADC14 and DMA driver.
-};
-
-// eUSCI_A2 RX: P3.2 / J1.3
-// eUSCI_A2 TX: P3.3 / J1.4
-class msp432_serial_driver : public lab6::serial
-{
-  // TODO: Implement the UART driver and its circular receive buffer.
 };
 
 class msp432_crc32_hardware : public lab6::crc32
@@ -124,6 +117,10 @@ int main()
                  semihosting_stdout_buffer.size());
     semihosting_ready = true;
   }
+
+  // SystemInit leaves SMCLK at 3 MHz with the starter clock configuration.
+  static msp432_serial_driver uart{ 3'000'000, { 9'600 } };
+  configASSERT(uart.ready());
 
   // This task is complete. LED1 blinking shows that FreeRTOS is scheduling.
   configASSERT(xTaskCreateStatic(blinker_task,
