@@ -3,6 +3,8 @@
 
 #include <ti/devices/msp432p4xx/inc/msp.h>
 
+#include "../msp432_lab5_uart/baud_dividers.hpp"
+
 msp432_serial_driver::msp432_serial_driver(std::uint32_t p_smclk_hz,
                                            settings const& p_settings)
   : m_smclk_hz(p_smclk_hz)
@@ -31,29 +33,28 @@ bool msp432_serial_driver::ready() const
 
 bool msp432_serial_driver::driver_configure(settings const& p_settings)
 {
-  if (p_settings.baud_rate != 9'600 ||
-      p_settings.parity != decltype(p_settings.parity)::none ||
-      p_settings.stop != settings::stop_bits::one) {
+  auto const baud =
+    msp432_uart_detail::calculate_baud(m_smclk_hz, p_settings.baud_rate);
+  using parity = decltype(p_settings.parity);
+  using stop_bits = settings::stop_bits;
+  // Reject unsupported framing BEFORE touching pins, UART, NVIC or the ring.
+  if (!baud.valid ||
+      (p_settings.parity != parity::none && p_settings.parity != parity::odd &&
+       p_settings.parity != parity::even) ||
+      (p_settings.stop != stop_bits::one &&
+       p_settings.stop != stop_bits::two)) {
     return false;
   }
-
-  // With oversampling, BRW supplies the groups of 16 clocks and BRF
-  // supplies the remaining clocks. For the lab's 3 MHz / 9600 baud,
-  // rounding to a whole clock keeps the baud error below 0.2%.
-  auto const baud_rate = p_settings.baud_rate;
-  auto const clocks_per_bit =
-    (std::uint64_t{m_smclk_hz} + baud_rate / 2) / baud_rate;
-  auto const prescaler = clocks_per_bit / 16;
-  auto const realized_clock = clocks_per_bit * baud_rate;
-  auto const clock_error = realized_clock > m_smclk_hz
-                             ? realized_clock - m_smclk_hz
-                             : m_smclk_hz - realized_clock;
-  if (prescaler == 0 || prescaler > UINT16_MAX ||
-      clock_error * 100 > realized_clock) {
-    return false;
+  std::uint16_t control = EUSCI_A_CTLW0_SWRST | EUSCI_A_CTLW0_SSEL__SMCLK;
+  if (p_settings.parity != parity::none) {
+    control |= EUSCI_A_CTLW0_PEN;
+    if (p_settings.parity == parity::even) {
+      control |= EUSCI_A_CTLW0_PAR;
+    }
   }
-  auto const modulation = ((clocks_per_bit % 16) << 4) | EUSCI_A_MCTLW_OS16;
-
+  if (p_settings.stop == stop_bits::two) {
+    control |= EUSCI_A_CTLW0_SPB;
+  }
   auto const mask = __get_PRIMASK();
   __disable_irq();
   if (m_owner != nullptr && m_owner != this) {
@@ -62,13 +63,13 @@ bool msp432_serial_driver::driver_configure(settings const& p_settings)
   }
   EUSCI_A2->IE = 0;
   NVIC_DisableIRQ(EUSCIA2_IRQn);
-  EUSCI_A2->CTLW0 = EUSCI_A_CTLW0_SWRST | EUSCI_A_CTLW0_SSEL__SMCLK;
+  EUSCI_A2->CTLW0 = control;
   // P3.2 = RX (J1.3), P3.3 = TX (J1.4), primary module function.
   P3->SEL0 |= 0x0C;
   P3->SEL1 &= ~0x0C;
   P3->DIR = (P3->DIR & ~0x04) | 0x08;
-  EUSCI_A2->BRW = static_cast<std::uint16_t>(prescaler);
-  EUSCI_A2->MCTLW = static_cast<std::uint16_t>(modulation);
+  EUSCI_A2->BRW = baud.prescaler;
+  EUSCI_A2->MCTLW = baud.modulation;
   m_cursor = 0;
   m_owner = this;
   NVIC_ClearPendingIRQ(EUSCIA2_IRQn);
