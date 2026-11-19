@@ -31,28 +31,11 @@ bool msp432_serial_driver::ready() const
 
 bool msp432_serial_driver::driver_configure(settings const& p_settings)
 {
-  if (p_settings.baud_rate != 9'600 ||
+  if (m_smclk_hz != 3'000'000 || p_settings.baud_rate != 9'600 ||
       p_settings.parity != decltype(p_settings.parity)::none ||
       p_settings.stop != settings::stop_bits::one) {
     return false;
   }
-
-  // With oversampling, BRW supplies the groups of 16 clocks and BRF
-  // supplies the remaining clocks. For the lab's 3 MHz / 9600 baud,
-  // rounding to a whole clock keeps the baud error below 0.2%.
-  auto const baud_rate = p_settings.baud_rate;
-  auto const clocks_per_bit =
-    (std::uint64_t{m_smclk_hz} + baud_rate / 2) / baud_rate;
-  auto const prescaler = clocks_per_bit / 16;
-  auto const realized_clock = clocks_per_bit * baud_rate;
-  auto const clock_error = realized_clock > m_smclk_hz
-                             ? realized_clock - m_smclk_hz
-                             : m_smclk_hz - realized_clock;
-  if (prescaler == 0 || prescaler > UINT16_MAX ||
-      clock_error * 100 > realized_clock) {
-    return false;
-  }
-  auto const modulation = ((clocks_per_bit % 16) << 4) | EUSCI_A_MCTLW_OS16;
 
   auto const mask = __get_PRIMASK();
   __disable_irq();
@@ -61,14 +44,14 @@ bool msp432_serial_driver::driver_configure(settings const& p_settings)
     return false;
   }
   EUSCI_A2->IE = 0;
-  NVIC_DisableIRQ(EUSCIA2_IRQn);
   EUSCI_A2->CTLW0 = EUSCI_A_CTLW0_SWRST | EUSCI_A_CTLW0_SSEL__SMCLK;
   // P3.2 = RX (J1.3), P3.3 = TX (J1.4), primary module function.
-  P3->SEL0 |= 0x0C;
-  P3->SEL1 &= ~0x0C;
-  P3->DIR = (P3->DIR & ~0x04) | 0x08;
-  EUSCI_A2->BRW = static_cast<std::uint16_t>(prescaler);
-  EUSCI_A2->MCTLW = static_cast<std::uint16_t>(modulation);
+  constexpr auto uart_pins = 0b11u << 2;
+  P3->SEL0 |= uart_pins;
+  P3->SEL1 &= ~uart_pins;
+  // TI settings for 3 MHz SMCLK, 9600 baud: BRW=19, BRF=8, BRS=0x55, OS16=1.
+  EUSCI_A2->BRW = 19;
+  EUSCI_A2->MCTLW = 0x5581;
   m_cursor = 0;
   m_owner = this;
   NVIC_ClearPendingIRQ(EUSCIA2_IRQn);
@@ -93,15 +76,6 @@ void msp432_serial_driver::driver_write(std::span<std::uint8_t const> p_data)
   }
 }
 
-void msp432_serial_driver::store_received(std::uint8_t p_byte)
-{
-  auto const cursor = m_cursor;
-  m_buffer[cursor] = p_byte;
-  // Publish data before its next-write cursor on this single-core Cortex-M4.
-  __DMB();
-  m_cursor = (cursor + 1) % buffer_size;
-}
-
 void msp432_serial_driver::handle_interrupt()
 {
   if (m_owner == nullptr) {
@@ -110,8 +84,11 @@ void msp432_serial_driver::handle_interrupt()
   }
   // Reading RXBUF acknowledges RXIFG. Drain any byte arriving during the ISR.
   while ((EUSCI_A2->IFG & EUSCI_A_IFG_RXIFG) != 0) {
-    auto const byte = static_cast<std::uint8_t>(EUSCI_A2->RXBUF);
-    m_owner->store_received(byte);
+    auto const cursor = m_owner->m_cursor;
+    m_owner->m_buffer[cursor] = static_cast<std::uint8_t>(EUSCI_A2->RXBUF);
+    // Publish the byte before advancing the next-write cursor.
+    __DMB();
+    m_owner->m_cursor = (cursor + 1) % buffer_size;
   }
 }
 

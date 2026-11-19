@@ -27,7 +27,6 @@ private:
   void driver_write(std::span<std::uint8_t const> p_data) override;
   std::span<std::uint8_t const> driver_receive_buffer() override;
   std::size_t driver_receive_cursor() override;
-  void store_received(std::uint8_t p_byte);
 
   inline static msp432_serial_driver* m_owner = nullptr;
   std::uint32_t m_smclk_hz;
